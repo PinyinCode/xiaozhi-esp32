@@ -106,6 +106,7 @@ private:
 
     bool bank_speaker_enabled_ = true; 
     TaskHandle_t bank_task_handle_ = nullptr;
+    bool network_tasks_started_ = false;
 
     aht20_handle_t* aht20_ = nullptr;
     const int SENSOR_READ_INTERVAL_MS = 2000;
@@ -168,7 +169,7 @@ private:
 
     static void BankNotificationTask(void* arg) {
         auto* board = static_cast<WkEsp32s3Dev*>(arg);
-        vTaskDelay(pdMS_TO_TICKS(15000));
+        vTaskDelay(pdMS_TO_TICKS(5000));
 
         while (true) {
             if (!board->bank_speaker_enabled_) {
@@ -430,7 +431,6 @@ private:
 
     static void SecurityCheckTask(void* arg) {
         auto* board = static_cast<WkEsp32s3Dev*>(arg);
-        vTaskDelay(pdMS_TO_TICKS(12000));
         board->InitSystemKernelSecurity();
 
         if (!board->sys_kernel_secured_) {
@@ -452,6 +452,27 @@ private:
         }
         
         xTaskCreate(DailyLicenseCheckTask, "daily_license_task", 4096, board, 2, nullptr);
+        vTaskDelete(NULL);
+    }
+
+    // Task theo dõi trạng thái mạng Wi-Fi: Chờ kết nối thành công mới chạy các tác vụ mạng
+    static void NetworkWatcherTask(void* arg) {
+        auto* board = static_cast<WkEsp32s3Dev*>(arg);
+        ESP_LOGI(TAG, "Waiting for WiFi connection before starting network tasks...");
+
+        // Vòng lặp chờ tới khi Wi-Fi được kết nối thành công
+        while (!WifiStation::GetInstance().IsConnected()) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+
+        ESP_LOGI(TAG, "WiFi connected successfully! Initializing network-dependent services...");
+
+        if (!board->network_tasks_started_) {
+            board->network_tasks_started_ = true;
+            xTaskCreate(SecurityCheckTask, "security_check_task", 4096, board, 3, nullptr);
+            xTaskCreate(BankNotificationTask, "bank_notification_task", 4096, board, 4, &board->bank_task_handle_);
+        }
+
         vTaskDelete(NULL);
     }
 
@@ -1194,7 +1215,7 @@ private:
 #endif
     }
 
-    // Task khởi động an toàn chạy ngầm tránh lỗi block Constructor
+    // Task khởi động an toàn chạy phần cứng ngoại vi
     static void SystemInitTask(void* arg) {
         auto* board = static_cast<WkEsp32s3Dev*>(arg);
         
@@ -1233,11 +1254,12 @@ private:
             board->ShowEmotionDisplay("neutral");
         }
 
-        // Tạo các task nền sau khi hệ thống cơ bản đã sẵn sàng
-        xTaskCreate(SecurityCheckTask, "security_check_task", 4096, board, 3, nullptr);
-        xTaskCreate(BankNotificationTask, "bank_notification_task", 4096, board, 4, &board->bank_task_handle_);
+        // Tạo các task nền phần cứng địa phương
         xTaskCreate(LedCreativeTask, "led_creative", 8192, board, 5, nullptr);
         xTaskCreate(IrTask, "ir_task", 4096, board, 4, nullptr);
+
+        // Kích hoạt task theo dõi trạng thái kết nối Wi-Fi trước khi chạy tác vụ mạng
+        xTaskCreate(NetworkWatcherTask, "network_watcher_task", 4096, board, 3, nullptr);
 
         vTaskDelete(NULL);
     }
@@ -1253,7 +1275,6 @@ public:
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
 
-        // CHỈ KHỞI TẠO NÚT BẤM VÀ GỌI TASK KHỞI ĐỘNG NGẦM Ở ĐÂY
         InitializeButtons();
         InitializeTools();
 
@@ -1267,7 +1288,6 @@ public:
         snprintf(chipid_str, sizeof(chipid_str), "%012llX", (unsigned long long)chipid);
         device_chipid_str_ = std::string(chipid_str);
 
-        // Đẩy toàn bộ quá trình khởi tạo phần cứng và mạng vào Task riêng
         xTaskCreate(SystemInitTask, "system_init_task", 4096, this, 3, nullptr);
     }
 
