@@ -37,9 +37,9 @@
 
 #define TAG "WkEsp32s3Dev"
 
-// --- ĐỊNH NGHĨA CÁC ĐƯỜNG DẪN API NGÂN HÀNG CHO MCP ---
+// --- ĐỊNH NGHĨA CÁC ĐƯỜNG DẪN API NGÂN HÀNG CHO MCP (Đã sửa trùng lặp) ---
 #define API_BANK_STATS   "/api/stats/daily-total"
-#define API_BANK_HISTORY "/api/stats/daily-total"
+#define API_BANK_HISTORY "/api/stats/daily-history"
 
 class WkEsp32s3Dev;
 
@@ -1167,14 +1167,12 @@ private:
 #endif
     }
 
-    // Task khởi động: Khởi tạo phần cứng cục bộ -> Chờ Wi-Fi -> Kiểm tra bản quyền & Chạy dịch vụ mạng
     static void SystemInitTask(void* arg) {
         auto* board = static_cast<WkEsp32s3Dev*>(arg);
         
         vTaskDelay(pdMS_TO_TICKS(1000));
         ESP_LOGI(TAG, "Starting hardware initialization...");
 
-        // 1. Khởi tạo phần cứng cơ bản trước (OLED, Cảm biến, Motor, LED...)
         board->InitDisplay();
         board->InitializeUltrasonic();
         board->InitializeLedGpio();
@@ -1206,7 +1204,6 @@ private:
             board->display_->SetStatus("Dang cho WiFi...");
         }
 
-        // 2. Chờ kết nối Wi-Fi thành công trước khi kích hoạt dịch vụ mạng & kiểm tra bản quyền
         ESP_LOGI(TAG, "Waiting for WiFi connection...");
         auto& wifi_station = WifiStation::GetInstance();
         
@@ -1219,14 +1216,11 @@ private:
             board->display_->SetStatus("WiFi da ket noi");
         }
 
-        // 3. Khởi tạo MCP liên quan đến mạng
         board->InitializeBankSpeakerMcp();
         board->InitializeSystemInfoMcp();
 
-        // 4. Kiểm tra bản quyền hệ thống và OTA khi mạng đã sẵn sàng ổn định
         board->InitSystemKernelSecurity();
 
-        // Nếu hợp lệ, kích hoạt các Task nền yêu cầu kết nối mạng
         if (board->sys_kernel_secured_) {
             xTaskCreate(BankNotificationTask, "bank_notification_task", 4096, board, 4, &board->bank_task_handle_);
             xTaskCreate(DailyLicenseCheckTask, "daily_license_task", 4096, board, 2, nullptr);
@@ -1267,7 +1261,6 @@ public:
         snprintf(chipid_str, sizeof(chipid_str), "%012llX", (unsigned long long)chipid);
         device_chipid_str_ = std::string(chipid_str);
 
-        // Kích hoạt SystemInitTask chạy ngầm
         xTaskCreate(SystemInitTask, "system_init_task", 4096, this, 3, nullptr);
     }
 
