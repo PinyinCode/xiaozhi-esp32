@@ -37,7 +37,15 @@
 
 #define TAG "WkEsp32s3Dev"
 
-// --- ĐỊNH NGHĨA CÁC ĐƯỜNG DẪN API NGÂN HÀNG CHO MCP ---
+// ===== DEBUG MACROS =====
+#define DEBUG_PRINT(fmt, ...) \
+    ESP_LOGI(TAG, "[DEBUG] " fmt, ##__VA_ARGS__)
+#define ERROR_PRINT(fmt, ...) \
+    ESP_LOGE(TAG, "[ERROR] " fmt, ##__VA_ARGS__)
+#define WARN_PRINT(fmt, ...) \
+    ESP_LOGW(TAG, "[WARN] " fmt, ##__VA_ARGS__)
+
+// ===== ĐỊNH NGHĨA API =====
 #define API_BANK_STATS   "/api/stats/daily-total"
 #define API_BANK_HISTORY "/api/stats/daily-total"
 
@@ -132,6 +140,7 @@ private:
 
     friend class SensorController;
 
+    // ===== HTTP EVENT HANDLER =====
     static esp_err_t _http_event_handler(esp_http_client_event_t *evt) {
         switch(evt->event_id) {
             case HTTP_EVENT_ON_DATA:
@@ -162,11 +171,58 @@ private:
         std::string result = "";
         if (err == ESP_OK && esp_http_client_get_status_code(client) == 200) {
             result = response_data;
+        } else {
+            ERROR_PRINT("HTTP request failed: %s", esp_err_to_name(err));
         }
         esp_http_client_cleanup(client);
         return result;
     }
 
+    // ===== I2C SCAN DEBUG =====
+    void ScanI2CDevices() {
+        ESP_LOGI(TAG, "========================================");
+        ESP_LOGI(TAG, "        I2C SCAN START");
+        ESP_LOGI(TAG, "========================================");
+        
+        int ports[] = {I2C_NUM_0, I2C_NUM_1};
+        const char* port_names[] = {"I2C_NUM_0 (OLED)", "I2C_NUM_1 (Sensors)"};
+        
+        for (int i = 0; i < 2; i++) {
+            ESP_LOGI(TAG, "\n--- %s ---", port_names[i]);
+            int found = 0;
+            
+            for (uint8_t addr = 1; addr < 127; addr++) {
+                i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+                i2c_master_start(cmd);
+                i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+                i2c_master_stop(cmd);
+                esp_err_t ret = i2c_master_cmd_begin((i2c_port_t)ports[i], cmd, pdMS_TO_TICKS(50));
+                i2c_cmd_link_delete(cmd);
+                
+                if (ret == ESP_OK) {
+                    const char* device_name = "Unknown";
+                    if (addr == 0x3C || addr == 0x3D) device_name = "OLED";
+                    else if (addr == 0x38) device_name = "AHT20";
+                    else if (addr == 0x29) device_name = "TOF/VL53L0X";
+                    
+                    ESP_LOGI(TAG, "  Found: 0x%02X (%s)", addr, device_name);
+                    found++;
+                }
+            }
+            
+            if (found == 0) {
+                WARN_PRINT("  No devices found on %s!", port_names[i]);
+            } else {
+                ESP_LOGI(TAG, "  Total: %d device(s)", found);
+            }
+        }
+        
+        ESP_LOGI(TAG, "========================================");
+        ESP_LOGI(TAG, "         I2C SCAN END");
+        ESP_LOGI(TAG, "========================================");
+    }
+
+    // ===== BANK FUNCTIONS =====
     static void BankNotificationTask(void* arg) {
         auto* board = static_cast<WkEsp32s3Dev*>(arg);
         vTaskDelay(pdMS_TO_TICKS(15000));
@@ -201,14 +257,19 @@ private:
                             if (audio_url_item && cJSON_IsString(audio_url_item)) {
                                 std::string audio_url = audio_url_item->valuestring;
                                 if (msg_item && cJSON_IsString(msg_item)) {
-                                    ESP_LOGI(TAG, "Nhận tiền: %s", msg_item->valuestring);
+                                    ESP_LOGI(TAG, "💰 Nhận tiền: %s", msg_item->valuestring);
+                                    if (board->display_) {
+                                        board->display_->SetStatus(("+" + std::string(msg_item)).c_str());
+                                    }
                                 }
-                                ESP_LOGI(TAG, "Audio URL: %s", audio_url.c_str());
+                                DEBUG_PRINT("Audio URL: %s", audio_url.c_str());
                             }
                         }
                         cJSON_Delete(root);
                     }
                 }
+            } else {
+                WARN_PRINT("Bank notification check failed: %s", esp_err_to_name(err));
             }
             esp_http_client_cleanup(client);
 
@@ -223,6 +284,7 @@ private:
             [this](const PropertyList& p) -> ReturnValue {
                 bank_speaker_enabled_ = true;
                 if (display_) display_->SetStatus("Loa Ngan Hang: Bat");
+                ESP_LOGI(TAG, "Bank speaker enabled");
                 return "Đã bật tính năng loa thông báo chuyển khoản.";
             });
 
@@ -230,6 +292,7 @@ private:
             [this](const PropertyList& p) -> ReturnValue {
                 bank_speaker_enabled_ = false;
                 if (display_) display_->SetStatus("Loa Ngan Hang: Tat");
+                ESP_LOGI(TAG, "Bank speaker disabled");
                 return "Đã tắt tính năng loa thông báo chuyển khoản.";
             });
 
@@ -296,6 +359,7 @@ private:
             });
     }
 
+    // ===== OTA CHECK =====
     void CheckAndPerformOta() {
         std::string url = std::string(OTA_SERVER_URL) + std::string(API_CHECK_UPDATE) + "?chip_id=" + device_chipid_str_;
 
@@ -338,19 +402,22 @@ private:
                                 ESP_LOGI(TAG, "OTA Update successful. Rebooting...");
                                 esp_restart();
                             } else {
-                                ESP_LOGE(TAG, "OTA Update failed! Error: %s", esp_err_to_name(ota_ret));
+                                ERROR_PRINT("OTA Update failed! Error: %s", esp_err_to_name(ota_ret));
                             }
                         }
                     } else {
-                        ESP_LOGI(TAG, "System is up to date.");
+                        DEBUG_PRINT("System is up to date.");
                     }
                     cJSON_Delete(root);
                 }
             }
+        } else {
+            WARN_PRINT("OTA check failed: %s", esp_err_to_name(err));
         }
         esp_http_client_cleanup(client);
     }
 
+    // ===== LICENSE CHECK =====
     void InitSystemKernelSecurity() {
         uint8_t mac[6];
         esp_efuse_mac_get_default(mac);
@@ -361,6 +428,8 @@ private:
         char chipid_str[20];
         snprintf(chipid_str, sizeof(chipid_str), "%012llX", (unsigned long long)chipid);
         device_chipid_str_ = std::string(chipid_str);
+        
+        DEBUG_PRINT("Device Chip ID: %s", device_chipid_str_.c_str());
         
         InitSystemKernelSecurityCore();
         CheckAndPerformOta();
@@ -390,10 +459,10 @@ private:
                     if (status && cJSON_IsString(status)) {
                         if (strcmp(status->valuestring, "active") == 0) {
                             sys_kernel_secured_ = true;
-                            ESP_LOGI(TAG, "System license check: PASSED.");
+                            ESP_LOGI(TAG, "✅ System license check: PASSED.");
                         } else {
                             sys_kernel_secured_ = false;
-                            ESP_LOGW(TAG, "System license check: RESTRICTED/INACTIVE.");
+                            WARN_PRINT("System license check: RESTRICTED/INACTIVE.");
                         }
                     }
 
@@ -401,13 +470,16 @@ private:
                     if (!exp) exp = cJSON_GetObjectItem(root, "expires_at");
                     if (exp && cJSON_IsString(exp)) {
                         license_expiration_ = std::string(exp->valuestring);
+                        DEBUG_PRINT("License expires: %s", license_expiration_.c_str());
                     }
 
                     cJSON_Delete(root);
                 }
+            } else {
+                WARN_PRINT("License server returned status %d", status_code);
             }
         } else {
-            ESP_LOGW(TAG, "License server unreachable, allowing temporary grace period.");
+            WARN_PRINT("License server unreachable, allowing temporary grace period.");
         }
         esp_http_client_cleanup(client);
     }
@@ -420,7 +492,7 @@ private:
             board->InitSystemKernelSecurityCore();
 
             if (!board->sys_kernel_secured_) {
-                ESP_LOGE(TAG, "License expired during daily check! Locking device.");
+                ERROR_PRINT("License expired during daily check! Locking device.");
                 if (board->display_) {
                     board->display_->SetEmotion("X X");
                     board->display_->SetStatus("Het han ban quyen!");
@@ -435,7 +507,7 @@ private:
         board->InitSystemKernelSecurity();
 
         if (!board->sys_kernel_secured_) {
-            ESP_LOGE(TAG, "FATAL: Security violation or license revoked. Halting system.");
+            ERROR_PRINT("FATAL: Security violation or license revoked. Halting system.");
             
             if (board->display_) {
                 while (true) {
@@ -446,7 +518,7 @@ private:
                 }
             } else {
                 while (true) {
-                    ESP_LOGE(TAG, "DEVICE LOCKED. CHIP ID: %s", board->device_chipid_str_.c_str());
+                    ERROR_PRINT("DEVICE LOCKED. CHIP ID: %s", board->device_chipid_str_.c_str());
                     vTaskDelay(pdMS_TO_TICKS(5000));
                 }
             }
@@ -470,6 +542,7 @@ private:
             });
     }
 
+    // ===== IR FUNCTIONS =====
     std::string sanitizeKey(const std::string& input) {
         std::string result = input;
         std::transform(result.begin(), result.end(), result.begin(), ::tolower);
@@ -486,11 +559,20 @@ private:
         std::string key = sanitizeKey(deviceName);
         nvs_handle_t nvs_handle;
         esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
-        if (err != ESP_OK) return false;
+        if (err != ESP_OK) {
+            ERROR_PRINT("NVS open failed: %s", esp_err_to_name(err));
+            return false;
+        }
 
         err = nvs_set_blob(nvs_handle, key.c_str(), data, length);
         if (err == ESP_OK) err = nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
+        
+        if (err == ESP_OK) {
+            DEBUG_PRINT("IR code saved: %s (%d bytes)", key.c_str(), length);
+        } else {
+            ERROR_PRINT("IR code save failed: %s", esp_err_to_name(err));
+        }
         return err == ESP_OK;
     }
 
@@ -498,11 +580,15 @@ private:
         std::string key = sanitizeKey(deviceName);
         nvs_handle_t nvs_handle;
         esp_err_t err = nvs_open("storage", NVS_READONLY, &nvs_handle);
-        if (err != ESP_OK) return false;
+        if (err != ESP_OK) {
+            ERROR_PRINT("NVS open failed: %s", esp_err_to_name(err));
+            return false;
+        }
 
         size_t required_size = 0;
         err = nvs_get_blob(nvs_handle, key.c_str(), NULL, &required_size);
         if (err != ESP_OK) {
+            ERROR_PRINT("IR code not found: %s", key.c_str());
             nvs_close(nvs_handle);
             return false;
         }
@@ -511,6 +597,9 @@ private:
         err = nvs_get_blob(nvs_handle, key.c_str(), ir_data, &required_size);
         if (err == ESP_OK) {
             SendCustomIrSignal(ir_data, required_size);
+            DEBUG_PRINT("IR code played: %s", key.c_str());
+        } else {
+            ERROR_PRINT("IR code read failed: %s", esp_err_to_name(err));
         }
 
         delete[] ir_data;
@@ -519,6 +608,8 @@ private:
     }
 
     void InitializeInfrared() {
+        ESP_LOGI(TAG, "Initializing Infrared...");
+        
         gpio_config_t io_conf_tx = {};
         io_conf_tx.intr_type = GPIO_INTR_DISABLE;
         io_conf_tx.mode = GPIO_MODE_OUTPUT;
@@ -534,16 +625,23 @@ private:
         gpio_config(&io_conf_rx);
 
         ir_initialized_ = true;
+        DEBUG_PRINT("IR initialized: TX=%d, RX=%d", IR_TRANSMITTER_GPIO, IR_RECEIVER_GPIO);
     }
 
     void StartLearningIr(const std::string& targetName) {
         is_learning_mode = true;
         active_learning_device_ = targetName;
         ir_raw_len = 0;
+        ESP_LOGI(TAG, "Learning IR for: %s", targetName.c_str());
     }
 
     void SendCustomIrSignal(const uint8_t* data, size_t len) {
-        if (!ir_initialized_) return;
+        if (!ir_initialized_) {
+            WARN_PRINT("IR not initialized");
+            return;
+        }
+        // Implement IR signal sending here
+        DEBUG_PRINT("Sending IR signal: %d bytes", len);
     }
 
     bool ReceiveCustomIrSignal(uint8_t* buffer, size_t max_len, size_t* out_len) {
@@ -573,6 +671,7 @@ private:
                     is_learning_mode = false;
                     saveIRCodeToNVS(active_learning_device_, (uint8_t*)ir_raw_intervals, ir_raw_len * sizeof(uint32_t));
                     last_captured_ir_code_ = active_learning_device_ + " (Xung: " + std::to_string(ir_raw_len) + ")";
+                    ESP_LOGI(TAG, "IR learned: %s", last_captured_ir_code_.c_str());
                     active_learning_device_ = "";
                     return true;
                 }
@@ -607,8 +706,10 @@ private:
             [this](const PropertyList& p) -> ReturnValue {
                 std::string action = p["action"].value<std::string>();
                 std::string key = "fan_" + action;
-                playIRCodeFromNVS(key);
-                return "Đã thực hiện lệnh quạt: " + action;
+                if (playIRCodeFromNVS(key)) {
+                    return "Đã thực hiện lệnh quạt: " + action;
+                }
+                return "Không tìm thấy lệnh: " + action;
             });
 
         mcp.AddTool("self.tv.control", "Điều khiển TV", 
@@ -616,11 +717,14 @@ private:
             [this](const PropertyList& p) -> ReturnValue {
                 std::string cmd = p["command"].value<std::string>();
                 std::string key = "tv_" + cmd;
-                playIRCodeFromNVS(key);
-                return "Đã gửi lệnh TV: " + cmd;
+                if (playIRCodeFromNVS(key)) {
+                    return "Đã gửi lệnh TV: " + cmd;
+                }
+                return "Không tìm thấy lệnh: " + cmd;
             });
     }
 
+    // ===== AHT20 FUNCTIONS =====
     esp_err_t aht20_write(uint8_t cmd, const uint8_t* data, size_t len) {
         i2c_cmd_handle_t cmd_handle = i2c_cmd_link_create();
         i2c_master_start(cmd_handle);
@@ -652,28 +756,65 @@ private:
     }
 
     esp_err_t InitAHT20() {
+        ESP_LOGI(TAG, "=== INIT AHT20 START ===");
+        
         aht20_ = (aht20_handle_t*)calloc(1, sizeof(aht20_handle_t));
-        if (!aht20_) return ESP_ERR_NO_MEM;
+        if (!aht20_) {
+            ERROR_PRINT("Failed to allocate memory for AHT20");
+            return ESP_ERR_NO_MEM;
+        }
 
-        // Lưu ý: AHT20 chạy chung cổng I2C_NUM_1 trên chân 39, 40 với ToF
-        aht20_write(AHT20_CMD_SOFT_RESET, NULL, 0);
+        // Reset sensor
+        esp_err_t err = aht20_write(AHT20_CMD_SOFT_RESET, NULL, 0);
+        if (err != ESP_OK) {
+            ERROR_PRINT("AHT20 reset failed: %s", esp_err_to_name(err));
+            free(aht20_);
+            aht20_ = nullptr;
+            return err;
+        }
         vTaskDelay(pdMS_TO_TICKS(20));
+        DEBUG_PRINT("AHT20 reset successful");
 
+        // Check calibration
         uint8_t status;
-        aht20_read(&status, 1);
+        err = aht20_read(&status, 1);
+        if (err != ESP_OK) {
+            ERROR_PRINT("AHT20 read status failed: %s", esp_err_to_name(err));
+            free(aht20_);
+            aht20_ = nullptr;
+            return err;
+        }
+        
         if (status & 0x08) {
             aht20_->calibrated = true;
+            DEBUG_PRINT("AHT20 already calibrated");
         } else {
+            ESP_LOGI(TAG, "AHT20 not calibrated, calibrating...");
             uint8_t cal_cmd[2] = {0x08, 0x00};
-            aht20_write(AHT20_CMD_CALIBRATE, cal_cmd, 2);
+            err = aht20_write(AHT20_CMD_CALIBRATE, cal_cmd, 2);
+            if (err != ESP_OK) {
+                ERROR_PRINT("AHT20 calibration failed: %s", esp_err_to_name(err));
+                free(aht20_);
+                aht20_ = nullptr;
+                return err;
+            }
             vTaskDelay(pdMS_TO_TICKS(300));
             aht20_->calibrated = true;
+            ESP_LOGI(TAG, "AHT20 calibrated successfully");
         }
 
         aht20_->initialized = true;
+        
+        // Test read
         float temp, hum;
-        ReadAHT20(&temp, &hum);
-        aht20_->last_read_ms = esp_timer_get_time() / 1000;
+        err = ReadAHT20(&temp, &hum);
+        if (err == ESP_OK) {
+            aht20_->last_read_ms = esp_timer_get_time() / 1000;
+            ESP_LOGI(TAG, "✅ AHT20 initialized: Temp=%.1f°C, Hum=%.1f%%", temp, hum);
+        } else {
+            WARN_PRINT("AHT20 initialized but first read failed");
+        }
+        
         return ESP_OK;
     }
 
@@ -757,7 +898,10 @@ private:
     }
 
     void UpdateDisplayAnimation() {
-        if (!display_) return;
+        if (!display_) {
+            WARN_PRINT("Display not available");
+            return;
+        }
 
         if (!sys_kernel_secured_) {
             display_->SetEmotion("X X");
@@ -804,6 +948,7 @@ private:
 
     void ShowEmotionDisplay(const std::string& emotion) {
         current_emotion_ = emotion;
+        DEBUG_PRINT("Emotion set to: %s", emotion.c_str());
     }
 
     int BreathEffect(uint32_t time_ms, int speed) {
@@ -878,6 +1023,7 @@ private:
         else {
             led_timeout_ms_ = duration_seconds * 1000;
             led_timeout_start_ = led_tick_;
+            DEBUG_PRINT("LED timeout set to %d seconds", duration_seconds);
         }
     }
 
@@ -926,6 +1072,7 @@ private:
                 led_timeout_ms_ = 0;
                 led_auto_mode_ = true;
                 emotion_auto_mode_ = true;
+                DEBUG_PRINT("LED timeout expired, returning to auto mode");
             }
         }
         
@@ -974,6 +1121,8 @@ private:
         ledc_channel_config(&ch3);
         ledc_channel_config_t ch4 = {.gpio_num = DRV8833_IN4, .speed_mode = LEDC_LOW_SPEED_MODE, .channel = LEDC_CHANNEL_3, .timer_sel = LEDC_TIMER_0, .duty = 0, .hpoint = 0};
         ledc_channel_config(&ch4);
+        
+        DEBUG_PRINT("Motor initialized");
     }
     
     void SetLeftMotor(int speed) {
@@ -1017,21 +1166,38 @@ private:
     }
 
     void InitializeUltrasonic() {
-        // Khởi tạo riêng cổng I2C_NUM_1 trên chân 39 (SCL) và 40 (SDA) cho cảm biến khoảng cách & AHT20
+        ESP_LOGI(TAG, "=== INIT ULTRASONIC/TOF ===");
+        
         i2c_config_t conf = {};
         conf.mode = I2C_MODE_MASTER;
-        conf.sda_io_num = ULTRASONIC_SDA_PIN; // GPIO_NUM_40
-        conf.scl_io_num = ULTRASONIC_SCL_PIN; // GPIO_NUM_39
+        conf.sda_io_num = ULTRASONIC_SDA_PIN;
+        conf.scl_io_num = ULTRASONIC_SCL_PIN;
         conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
         conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+        conf.master.clk_speed = 400000;
         
-        i2c_param_config(TOF_I2C_PORT, &conf);
-        i2c_driver_install(TOF_I2C_PORT, conf.mode, 0, 0, 0);
+        esp_err_t err = i2c_param_config(TOF_I2C_PORT, &conf);
+        if (err != ESP_OK) {
+            ERROR_PRINT("I2C param config failed: %s", esp_err_to_name(err));
+            return;
+        }
+        
+        err = i2c_driver_install(TOF_I2C_PORT, conf.mode, 0, 0, 0);
+        if (err != ESP_OK) {
+            ERROR_PRINT("I2C driver install failed: %s", esp_err_to_name(err));
+            return;
+        }
 
-        ESP_LOGI(TAG, "Ultrasonic/ToF and Sensors initialized on independent I2C_NUM_1 (SCL:39, SDA:40).");
+        ESP_LOGI(TAG, "✅ Ultrasonic/TOF initialized on I2C_NUM_1 (SCL:%d, SDA:%d)", 
+                 ULTRASONIC_SCL_PIN, ULTRASONIC_SDA_PIN);
     }
 
     float ReadUltrasonicDistanceCm() {
+        if (!ir_initialized_) {
+            WARN_PRINT("TOF not initialized");
+            return -1.0f;
+        }
+        
         uint8_t reg_addr = 0x1E; 
         uint8_t data[2] = {0};
         i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -1045,8 +1211,13 @@ private:
         
         esp_err_t ret = i2c_master_cmd_begin(TOF_I2C_PORT, cmd, pdMS_TO_TICKS(100));
         i2c_cmd_link_delete(cmd);
-        if (ret != ESP_OK) return -1.0f;
-        return (float)((data[0] << 8) | data[1]) / 10.0f;
+        if (ret != ESP_OK) {
+            ERROR_PRINT("TOF read failed: %s", esp_err_to_name(ret));
+            return -1.0f;
+        }
+        float distance = (float)((data[0] << 8) | data[1]) / 10.0f;
+        DEBUG_PRINT("Distance: %.1f cm", distance);
+        return distance;
     }
 
     void InitializeLedGpio() {
@@ -1060,13 +1231,23 @@ private:
         gpio_config(&io_conf);
         gpio_set_level(LED_1, 0);
         gpio_set_level(LED_2, 0);
+        DEBUG_PRINT("LEDs initialized: LED1=%d, LED2=%d", LED_1, LED_2);
     }
 
     void InitializeAdc() {
         adc_oneshot_unit_init_cfg_t init_config = {.unit_id = POWER_ADC_UNIT, .ulp_mode = ADC_ULP_MODE_DISABLE};
-        adc_oneshot_new_unit(&init_config, &adc_handle_);
+        esp_err_t err = adc_oneshot_new_unit(&init_config, &adc_handle_);
+        if (err != ESP_OK) {
+            ERROR_PRINT("ADC init failed: %s", esp_err_to_name(err));
+            return;
+        }
         adc_oneshot_chan_cfg_t config = {.atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_12};
-        adc_oneshot_config_channel(adc_handle_, POWER_ADC_CHANNEL, &config);
+        err = adc_oneshot_config_channel(adc_handle_, POWER_ADC_CHANNEL, &config);
+        if (err != ESP_OK) {
+            ERROR_PRINT("ADC channel config failed: %s", esp_err_to_name(err));
+        } else {
+            DEBUG_PRINT("ADC initialized");
+        }
     }
 
     void InitializeMotorMcp() {
@@ -1076,6 +1257,7 @@ private:
                 if (!sys_kernel_secured_) return "Khóa hệ thống";
                 int speed = p["speed"].value<int>();
                 SetLeftMotor(speed); SetRightMotor(speed);
+                DEBUG_PRINT("Motor forward: %d%%", speed);
                 return "Tiến " + std::to_string(speed) + "%";
             });
         mcp.AddTool("self.motor.backward", "Robot lùi", PropertyList({Property("speed", kPropertyTypeInteger, 50, 0, 100)}),
@@ -1083,11 +1265,13 @@ private:
                 if (!sys_kernel_secured_) return "Khóa hệ thống";
                 int speed = p["speed"].value<int>();
                 SetLeftMotor(-speed); SetRightMotor(-speed);
+                DEBUG_PRINT("Motor backward: %d%%", speed);
                 return "Lùi " + std::to_string(speed) + "%";
             });
         mcp.AddTool("self.motor.stop", "Dừng", PropertyList(),
             [this](const PropertyList& p) -> ReturnValue {
                 SetLeftMotor(0); SetRightMotor(0);
+                DEBUG_PRINT("Motor stop");
                 return "Dừng";
             });
     }
@@ -1098,6 +1282,7 @@ private:
             [this](const PropertyList& p) -> ReturnValue {
                 current_volume_ = p["volume"].value<int>();
                 if (audio_codec_) audio_codec_->SetOutputVolume(current_volume_);
+                DEBUG_PRINT("Volume set to %d%%", current_volume_);
                 return "Âm lượng: " + std::to_string(current_volume_) + "%";
             });
     }
@@ -1108,12 +1293,14 @@ private:
             [this](const PropertyList& p) -> ReturnValue {
                 led_auto_mode_ = false;
                 gpio_set_level(LED_1, 1); gpio_set_level(LED_2, 1);
+                DEBUG_PRINT("LEDs turned on");
                 return "OK";
             });
         mcp.AddTool("self.led.off", "Tắt LED", PropertyList(),
             [this](const PropertyList& p) -> ReturnValue {
                 led_auto_mode_ = true;
                 gpio_set_level(LED_1, 0); gpio_set_level(LED_2, 0);
+                DEBUG_PRINT("LEDs turned off");
                 return "OK";
             });
     }
@@ -1133,7 +1320,9 @@ private:
             [this](const PropertyList& p) -> ReturnValue {
                 int adc_value = 0;
                 adc_oneshot_read(adc_handle_, POWER_ADC_CHANNEL, &adc_value);
-                return std::to_string((adc_value * 100) / 4095) + "%";
+                int level = (adc_value * 100) / 4095;
+                DEBUG_PRINT("Battery level: %d%% (ADC: %d)", level, adc_value);
+                return std::to_string(level) + "%";
             });
     }
 
@@ -1151,18 +1340,55 @@ private:
     }
 
     void InitDisplay() {
-        // Cài đặt độc lập cổng I2C_NUM_0 cho màn hình OLED trên chân 41, 42
+        ESP_LOGI(TAG, "=== INIT DISPLAY START ===");
+        ESP_LOGI(TAG, "Display pins: SDA=%d, SCL=%d", DISPLAY_SDA_PIN, DISPLAY_SCL_PIN);
+        
+        // Cấu hình I2C cho OLED
         i2c_config_t conf = {};
         conf.mode = I2C_MODE_MASTER;
-        conf.sda_io_num = DISPLAY_SDA_PIN; // GPIO_NUM_41
-        conf.scl_io_num = DISPLAY_SCL_PIN; // GPIO_NUM_42
+        conf.sda_io_num = DISPLAY_SDA_PIN;
+        conf.scl_io_num = DISPLAY_SCL_PIN;
         conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
         conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+        conf.master.clk_speed = 400000;
         
-        i2c_param_config(I2C_NUM_0, &conf);
-        i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0);
+        esp_err_t err = i2c_param_config(I2C_NUM_0, &conf);
+        if (err != ESP_OK) {
+            ERROR_PRINT("i2c_param_config failed: %s", esp_err_to_name(err));
+            return;
+        }
+        
+        err = i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0);
+        if (err != ESP_OK) {
+            ERROR_PRINT("i2c_driver_install failed: %s", esp_err_to_name(err));
+            return;
+        }
+        
+        // Scan I2C để tìm OLED
+        bool oled_found = false;
+        for (uint8_t addr = 1; addr < 127; addr++) {
+            i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+            i2c_master_start(cmd);
+            i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+            i2c_master_stop(cmd);
+            err = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(50));
+            i2c_cmd_link_delete(cmd);
+            if (err == ESP_OK) {
+                DEBUG_PRINT("Found I2C device at 0x%02X", addr);
+                if (addr == 0x3C || addr == 0x3D) {
+                    oled_found = true;
+                    ESP_LOGI(TAG, "✅ OLED found at address 0x%02X", addr);
+                }
+            }
+        }
+        
+        if (!oled_found) {
+            ERROR_PRINT("❌ OLED not found on I2C bus! Check wiring.");
+            return;
+        }
 
 #if CONFIG_WK_ESP32S3_DEV_DISPLAY_OLED
+        // Cấu hình panel IO
         esp_lcd_panel_io_i2c_config_t io_config = {};
         io_config.dev_addr = 0x3C;
         io_config.scl_speed_hz = 400 * 1000;
@@ -1171,8 +1397,14 @@ private:
         io_config.lcd_cmd_bits = 8;
         io_config.lcd_param_bits = 8;
 
-        esp_lcd_new_panel_io_i2c(I2C_NUM_0, &io_config, &panel_io_);
+        err = esp_lcd_new_panel_io_i2c(I2C_NUM_0, &io_config, &panel_io_);
+        if (err != ESP_OK) {
+            ERROR_PRINT("esp_lcd_new_panel_io_i2c failed: %s", esp_err_to_name(err));
+            return;
+        }
+        DEBUG_PRINT("Panel IO created successfully");
 
+        // Cấu hình panel
         esp_lcd_panel_dev_config_t panel_config = {};
         panel_config.reset_gpio_num = GPIO_NUM_NC;
         panel_config.bits_per_pixel = 1;
@@ -1182,39 +1414,101 @@ private:
         };
         panel_config.vendor_config = &ssd1306_config;
 
-        esp_lcd_new_panel_ssd1306(panel_io_, &panel_config, &panel_);
-        esp_lcd_panel_reset(panel_);
-        esp_lcd_panel_init(panel_);
-        esp_lcd_panel_disp_on_off(panel_, true);
+        err = esp_lcd_new_panel_ssd1306(panel_io_, &panel_config, &panel_);
+        if (err != ESP_OK) {
+            ERROR_PRINT("esp_lcd_new_panel_ssd1306 failed: %s", esp_err_to_name(err));
+            return;
+        }
+        DEBUG_PRINT("Panel created successfully");
 
-        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
+        // Reset panel
+        vTaskDelay(pdMS_TO_TICKS(100));
+        err = esp_lcd_panel_reset(panel_);
+        if (err != ESP_OK) {
+            ERROR_PRINT("panel reset failed: %s", esp_err_to_name(err));
+            return;
+        }
+        DEBUG_PRINT("Panel reset successful");
+
+        // Init panel
+        vTaskDelay(pdMS_TO_TICKS(100));
+        err = esp_lcd_panel_init(panel_);
+        if (err != ESP_OK) {
+            ERROR_PRINT("panel init failed: %s", esp_err_to_name(err));
+            return;
+        }
+        DEBUG_PRINT("Panel init successful");
+
+        // Turn on display
+        err = esp_lcd_panel_disp_on_off(panel_, true);
+        if (err != ESP_OK) {
+            ERROR_PRINT("panel display on failed: %s", esp_err_to_name(err));
+            return;
+        }
+        DEBUG_PRINT("Display turned on");
+
+        // Create display object
+        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, 
+                                   DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
+        
+        if (display_) {
+            display_->SetEmotion("O O");
+            display_->SetStatus("Khoi tao OK");
+            ESP_LOGI(TAG, "✅ DISPLAY INIT SUCCESS!");
+        } else {
+            ERROR_PRINT("Failed to create OledDisplay object");
+        }
+#else
+        WARN_PRINT("OLED display not enabled in config");
 #endif
     }
 
-    // Task khởi động an toàn chạy ngầm tránh lỗi block Constructor
+    // ===== SYSTEM INIT TASK =====
     static void SystemInitTask(void* arg) {
         auto* board = static_cast<WkEsp32s3Dev*>(arg);
         
+        ESP_LOGI(TAG, "========================================");
+        ESP_LOGI(TAG, "     SYSTEM INIT TASK START");
+        ESP_LOGI(TAG, "========================================");
+        
         vTaskDelay(pdMS_TO_TICKS(1000));
-        ESP_LOGI(TAG, "Starting delayed hardware initialization...");
-
+        
+        // Scan I2C để debug
+        board->ScanI2CDevices();
+        
+        // Khởi tạo các thành phần
+        ESP_LOGI(TAG, "\n--- Initializing Display ---");
         board->InitDisplay();
-        board->InitializeUltrasonic(); // Khởi tạo I2C_NUM_1 (chân 39, 40)
+        
+        ESP_LOGI(TAG, "\n--- Initializing Ultrasonic/TOF ---");
+        board->InitializeUltrasonic();
+        
+        ESP_LOGI(TAG, "\n--- Initializing LEDs ---");
         board->InitializeLedGpio();
+        
+        ESP_LOGI(TAG, "\n--- Initializing ADC ---");
         board->InitializeAdc();
 
-        board->InitAHT20();            // Dùng chung I2C_NUM_1 với ToF
-        board->InitializeAHT20Mcp();
-        board->InitializeSensorMcp();
+        ESP_LOGI(TAG, "\n--- Initializing AHT20 Sensor ---");
+        esp_err_t err = board->InitAHT20();
+        if (err == ESP_OK) {
+            board->InitializeAHT20Mcp();
+            board->InitializeSensorMcp();
+        } else {
+            WARN_PRINT("AHT20 initialization failed, continuing without sensor");
+        }
 
+        ESP_LOGI(TAG, "\n--- Initializing Infrared ---");
         board->InitializeInfrared();
         board->InitializeInfraredMcp();
 
 #ifdef CONFIG_BOARD_WK_HAVE_MOTOR
+        ESP_LOGI(TAG, "\n--- Initializing Motors ---");
         board->InitializeMotor();
         board->InitializeMotorMcp();
 #endif
 
+        ESP_LOGI(TAG, "\n--- Initializing MCP Tools ---");
         board->InitializeLedMcp();
         board->InitializeEmotionMcp();
         board->InitializeVolumeMcp();
@@ -1222,21 +1516,31 @@ private:
         board->InitializeBankSpeakerMcp();
         board->InitializeSystemInfoMcp();
 
+        ESP_LOGI(TAG, "\n--- Initializing Audio ---");
         board->audio_codec_ = board->GetAudioCodec();
         if (board->audio_codec_) {
             board->audio_codec_->SetOutputVolume(board->current_volume_);
+            ESP_LOGI(TAG, "Audio codec initialized, volume: %d%%", board->current_volume_);
+        } else {
+            ERROR_PRINT("Failed to get audio codec");
         }
 
         if (board->display_) {
             board->ShowEmotionDisplay("neutral");
+            ESP_LOGI(TAG, "Display ready with neutral emotion");
         }
 
-        // Tạo các task nền sau khi hệ thống cơ bản đã sẵn sàng
+        // Tạo các task nền
+        ESP_LOGI(TAG, "\n--- Creating Background Tasks ---");
         xTaskCreate(SecurityCheckTask, "security_check_task", 4096, board, 3, nullptr);
         xTaskCreate(BankNotificationTask, "bank_notification_task", 4096, board, 4, &board->bank_task_handle_);
         xTaskCreate(LedCreativeTask, "led_creative", 8192, board, 5, nullptr);
         xTaskCreate(IrTask, "ir_task", 4096, board, 4, nullptr);
 
+        ESP_LOGI(TAG, "========================================");
+        ESP_LOGI(TAG, "     SYSTEM INIT COMPLETE ✅");
+        ESP_LOGI(TAG, "========================================");
+        
         vTaskDelete(NULL);
     }
 
@@ -1251,10 +1555,15 @@ public:
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
 
-        // CHỈ KHỞI TẠO NÚT BẤM VÀ GỌI TASK KHỞI ĐỘNG NGẦM Ở ĐÂY
+        ESP_LOGI(TAG, "========================================");
+        ESP_LOGI(TAG, "     WK ESP32-S3 DEV BOARD");
+        ESP_LOGI(TAG, "========================================");
+
+        // Khởi tạo nút bấm
         InitializeButtons();
         InitializeTools();
 
+        // Lấy Chip ID
         uint8_t mac[6];
         esp_efuse_mac_get_default(mac);
         uint64_t chipid = 0;
@@ -1264,21 +1573,25 @@ public:
         char chipid_str[20];
         snprintf(chipid_str, sizeof(chipid_str), "%012llX", (unsigned long long)chipid);
         device_chipid_str_ = std::string(chipid_str);
+        ESP_LOGI(TAG, "Chip ID: %s", device_chipid_str_.c_str());
 
-        // Đẩy toàn bộ quá trình khởi tạo phần cứng và mạng vào Task riêng
-        xTaskCreate(SystemInitTask, "system_init_task", 4096, this, 3, nullptr);
+        // Khởi tạo hệ thống trong task riêng
+        xTaskCreate(SystemInitTask, "system_init_task", 8192, this, 3, nullptr);
     }
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             if (!sys_kernel_secured_) {
+                WARN_PRINT("System locked, button ignored");
                 return;
             }
             if (app.GetDeviceState() == kDeviceStateStarting) {
+                ESP_LOGI(TAG, "Entering WiFi config mode");
                 EnterWifiConfigMode();
                 return;
             }
+            ESP_LOGI(TAG, "Toggle chat state");
             app.ToggleChatState();
         });
 
@@ -1286,15 +1599,20 @@ public:
         touch_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             if (!sys_kernel_secured_) {
+                WARN_PRINT("System locked, touch ignored");
                 return;
             }
             if (app.GetDeviceState() == kDeviceStateStarting) {
+                ESP_LOGI(TAG, "Entering WiFi config mode");
                 EnterWifiConfigMode();
                 return;
             }
+            ESP_LOGI(TAG, "Toggle chat state (touch)");
             app.ToggleChatState();
         });
 #endif
+        
+        DEBUG_PRINT("Buttons initialized");
     }
 
     void InitializeTools() {}
