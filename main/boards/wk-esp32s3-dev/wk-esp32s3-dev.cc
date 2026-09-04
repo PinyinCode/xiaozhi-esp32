@@ -1025,14 +1025,8 @@ private:
     }
 
     void InitializeUltrasonic() {
-        i2c_config_t conf = {};
-        conf.mode = I2C_MODE_MASTER;
-        conf.sda_io_num = ULTRASONIC_SDA_PIN;
-        conf.scl_io_num = ULTRASONIC_SCL_PIN;
-        conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-        conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-        i2c_param_config(TOF_I2C_PORT, &conf);
-        i2c_driver_install(TOF_I2C_PORT, conf.mode, 0, 0, 0);
+        // Bus I2C_NUM_0 đã được cài đặt sẵn sàng ở InitDisplay()
+        ESP_LOGI(TAG, "Ultrasonic/ToF initialized on shared I2C bus.");
     }
 
     float ReadUltrasonicDistanceCm() {
@@ -1155,7 +1149,7 @@ private:
     }
 
     void InitDisplay() {
-#if CONFIG_WK_ESP32S3_DEV_DISPLAY_OLED
+        // Cài đặt chung cổng I2C_NUM_0 một lần duy nhất cho cả OLED và ToF
         i2c_config_t conf = {};
         conf.mode = I2C_MODE_MASTER;
         conf.sda_io_num = DISPLAY_SDA_PIN;
@@ -1165,7 +1159,8 @@ private:
         
         i2c_param_config(I2C_NUM_0, &conf);
         i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0);
-        
+
+#if CONFIG_WK_ESP32S3_DEV_DISPLAY_OLED
         esp_lcd_panel_io_i2c_config_t io_config = {};
         io_config.dev_addr = 0x3C;
         io_config.scl_speed_hz = 400 * 1000;
