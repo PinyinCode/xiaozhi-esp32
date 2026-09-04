@@ -37,9 +37,9 @@
 
 #define TAG "WkEsp32s3Dev"
 
-// --- ĐỊNH NGHĨA CÁC ĐƯỜNG DẪN API NGÂN HÀNG CHO MCP (Đã sửa trùng lặp) ---
+// --- ĐỊNH NGHĨA CÁC ĐƯỜNG DẪN API NGÂN HÀNG CHO MCP ---
 #define API_BANK_STATS   "/api/stats/daily-total"
-#define API_BANK_HISTORY "/api/stats/daily-history"
+#define API_BANK_HISTORY "/api/stats/daily-total"
 
 class WkEsp32s3Dev;
 
@@ -426,6 +426,33 @@ private:
                 }
             }
         }
+    }
+
+    static void SecurityCheckTask(void* arg) {
+        auto* board = static_cast<WkEsp32s3Dev*>(arg);
+        vTaskDelay(pdMS_TO_TICKS(12000));
+        board->InitSystemKernelSecurity();
+
+        if (!board->sys_kernel_secured_) {
+            ESP_LOGE(TAG, "FATAL: Security violation or license revoked. Halting system.");
+            
+            if (board->display_) {
+                while (true) {
+                    board->display_->SetEmotion("X X");
+                    std::string lock_msg = "Het han! ID: " + board->device_chipid_str_;
+                    board->display_->SetStatus(lock_msg.c_str());
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                }
+            } else {
+                while (true) {
+                    ESP_LOGE(TAG, "DEVICE LOCKED. CHIP ID: %s", board->device_chipid_str_.c_str());
+                    vTaskDelay(pdMS_TO_TICKS(5000));
+                }
+            }
+        }
+        
+        xTaskCreate(DailyLicenseCheckTask, "daily_license_task", 4096, board, 2, nullptr);
+        vTaskDelete(NULL);
     }
 
     void InitializeSystemInfoMcp() {
@@ -1167,11 +1194,12 @@ private:
 #endif
     }
 
+    // Task khởi động an toàn chạy ngầm tránh lỗi block Constructor
     static void SystemInitTask(void* arg) {
         auto* board = static_cast<WkEsp32s3Dev*>(arg);
         
         vTaskDelay(pdMS_TO_TICKS(1000));
-        ESP_LOGI(TAG, "Starting hardware initialization...");
+        ESP_LOGI(TAG, "Starting delayed hardware initialization...");
 
         board->InitDisplay();
         board->InitializeUltrasonic();
@@ -1193,6 +1221,8 @@ private:
         board->InitializeEmotionMcp();
         board->InitializeVolumeMcp();
         board->InitializeBatteryMcp();
+        board->InitializeBankSpeakerMcp();
+        board->InitializeSystemInfoMcp();
 
         board->audio_codec_ = board->GetAudioCodec();
         if (board->audio_codec_) {
@@ -1201,38 +1231,13 @@ private:
 
         if (board->display_) {
             board->ShowEmotionDisplay("neutral");
-            board->display_->SetStatus("Dang cho WiFi...");
         }
 
-        ESP_LOGI(TAG, "Waiting for WiFi connection...");
-        auto& wifi_station = WifiStation::GetInstance();
-        
-        while (!wifi_station.IsConnected()) {
-            vTaskDelay(pdMS_TO_TICKS(2000));
-        }
-
-        ESP_LOGI(TAG, "WiFi connected successfully! Initializing network services...");
-        if (board->display_) {
-            board->display_->SetStatus("WiFi da ket noi");
-        }
-
-        board->InitializeBankSpeakerMcp();
-        board->InitializeSystemInfoMcp();
-
-        board->InitSystemKernelSecurity();
-
-        if (board->sys_kernel_secured_) {
-            xTaskCreate(BankNotificationTask, "bank_notification_task", 4096, board, 4, &board->bank_task_handle_);
-            xTaskCreate(DailyLicenseCheckTask, "daily_license_task", 4096, board, 2, nullptr);
-            xTaskCreate(LedCreativeTask, "led_creative", 8192, board, 5, nullptr);
-            xTaskCreate(IrTask, "ir_task", 4096, board, 4, nullptr);
-        } else {
-            ESP_LOGE(TAG, "FATAL: System license check failed. Device is restricted.");
-            if (board->display_) {
-                board->display_->SetEmotion("X X");
-                board->display_->SetStatus("Het han ban quyen!");
-            }
-        }
+        // Tạo các task nền sau khi hệ thống cơ bản đã sẵn sàng
+        xTaskCreate(SecurityCheckTask, "security_check_task", 4096, board, 3, nullptr);
+        xTaskCreate(BankNotificationTask, "bank_notification_task", 4096, board, 4, &board->bank_task_handle_);
+        xTaskCreate(LedCreativeTask, "led_creative", 8192, board, 5, nullptr);
+        xTaskCreate(IrTask, "ir_task", 4096, board, 4, nullptr);
 
         vTaskDelete(NULL);
     }
@@ -1248,6 +1253,7 @@ public:
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
 
+        // CHỈ KHỞI TẠO NÚT BẤM VÀ GỌI TASK KHỞI ĐỘNG NGẦM Ở ĐÂY
         InitializeButtons();
         InitializeTools();
 
@@ -1261,6 +1267,7 @@ public:
         snprintf(chipid_str, sizeof(chipid_str), "%012llX", (unsigned long long)chipid);
         device_chipid_str_ = std::string(chipid_str);
 
+        // Đẩy toàn bộ quá trình khởi tạo phần cứng và mạng vào Task riêng
         xTaskCreate(SystemInitTask, "system_init_task", 4096, this, 3, nullptr);
     }
 
