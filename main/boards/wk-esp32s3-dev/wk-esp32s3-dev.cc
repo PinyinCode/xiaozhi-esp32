@@ -1194,6 +1194,54 @@ private:
 #endif
     }
 
+    // Task khởi động an toàn chạy ngầm tránh lỗi block Constructor
+    static void SystemInitTask(void* arg) {
+        auto* board = static_cast<WkEsp32s3Dev*>(arg);
+        
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        ESP_LOGI(TAG, "Starting delayed hardware initialization...");
+
+        board->InitDisplay();
+        board->InitializeUltrasonic();
+        board->InitializeLedGpio();
+        board->InitializeAdc();
+
+        board->InitAHT20();
+        board->InitializeAHT20Mcp();
+
+        board->InitializeInfrared();
+        board->InitializeInfraredMcp();
+
+#ifdef CONFIG_BOARD_WK_HAVE_MOTOR
+        board->InitializeMotor();
+        board->InitializeMotorMcp();
+#endif
+
+        board->InitializeLedMcp();
+        board->InitializeEmotionMcp();
+        board->InitializeVolumeMcp();
+        board->InitializeBatteryMcp();
+        board->InitializeBankSpeakerMcp();
+        board->InitializeSystemInfoMcp();
+
+        board->audio_codec_ = board->GetAudioCodec();
+        if (board->audio_codec_) {
+            board->audio_codec_->SetOutputVolume(board->current_volume_);
+        }
+
+        if (board->display_) {
+            board->ShowEmotionDisplay("neutral");
+        }
+
+        // Tạo các task nền sau khi hệ thống cơ bản đã sẵn sàng
+        xTaskCreate(SecurityCheckTask, "security_check_task", 4096, board, 3, nullptr);
+        xTaskCreate(BankNotificationTask, "bank_notification_task", 4096, board, 4, &board->bank_task_handle_);
+        xTaskCreate(LedCreativeTask, "led_creative", 8192, board, 5, nullptr);
+        xTaskCreate(IrTask, "ir_task", 4096, board, 4, nullptr);
+
+        vTaskDelete(NULL);
+    }
+
 public:
     WkEsp32s3Dev() :
         boot_button_(BOOT_BUTTON_GPIO),
@@ -1205,7 +1253,9 @@ public:
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
 
-        InitDisplay();
+        // CHỈ KHỞI TẠO NÚT BẤM VÀ GỌI TASK KHỞI ĐỘNG NGẦM Ở ĐÂY
+        InitializeButtons();
+        InitializeTools();
 
         uint8_t mac[6];
         esp_efuse_mac_get_default(mac);
@@ -1217,45 +1267,8 @@ public:
         snprintf(chipid_str, sizeof(chipid_str), "%012llX", (unsigned long long)chipid);
         device_chipid_str_ = std::string(chipid_str);
 
-        InitializeSystemInfoMcp();
-
-        xTaskCreate(SecurityCheckTask, "security_check_task", 4096, this, 3, nullptr);
-
-#ifdef CONFIG_BOARD_WK_HAVE_MOTOR
-        InitializeMotor();
-        InitializeMotorMcp();
-#endif
-
-        InitializeUltrasonic();
-        InitializeLedGpio();
-        InitializeLedMcp();
-        InitializeEmotionMcp();
-        InitializeVolumeMcp();
-        InitializeAdc();
-        InitializeBatteryMcp();
-
-        InitAHT20();
-        InitializeAHT20Mcp();
-
-        InitializeInfrared();
-        InitializeInfraredMcp();
-
-        InitializeBankSpeakerMcp();
-        xTaskCreate(BankNotificationTask, "bank_notification_task", 4096, this, 4, &bank_task_handle_);
-
-        anim_led1_.active = true;
-        anim_led2_.active = true;
-        xTaskCreate(LedCreativeTask, "led_creative", 8192, this, 5, nullptr);
-        xTaskCreate(IrTask, "ir_task", 4096, this, 4, nullptr);
-
-        if (display_) ShowEmotionDisplay("neutral");
-
-        InitializeButtons();
-        InitializeTools();
-        InitializeSensorMcp();
-        
-        audio_codec_ = GetAudioCodec();
-        if (audio_codec_) audio_codec_->SetOutputVolume(current_volume_);
+        // Đẩy toàn bộ quá trình khởi tạo phần cứng và mạng vào Task riêng
+        xTaskCreate(SystemInitTask, "system_init_task", 4096, this, 3, nullptr);
     }
 
     void InitializeButtons() {
