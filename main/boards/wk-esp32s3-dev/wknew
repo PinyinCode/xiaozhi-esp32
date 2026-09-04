@@ -47,8 +47,9 @@ class WkEsp32s3Dev;
 #define AHT20_CMD_TRIGGER      0xAC
 #define AHT20_CMD_SOFT_RESET   0xBA
 #define AHT20_I2C_PORT         I2C_NUM_1
+#define AHT20_I2C_ADDR         0x38
 
-#define TOF_I2C_PORT           I2C_NUM_0
+#define TOF_I2C_PORT           I2C_NUM_1
 #define TOF_I2C_ADDR           0x29
 
 typedef struct {
@@ -654,16 +655,7 @@ private:
         aht20_ = (aht20_handle_t*)calloc(1, sizeof(aht20_handle_t));
         if (!aht20_) return ESP_ERR_NO_MEM;
 
-        i2c_config_t conf = {};
-        conf.mode = I2C_MODE_MASTER;
-        conf.sda_io_num = AHT20_SDA_PIN;
-        conf.scl_io_num = AHT20_SCL_PIN;
-        conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-        conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-
-        i2c_param_config(AHT20_I2C_PORT, &conf);
-        i2c_driver_install(AHT20_I2C_PORT, conf.mode, 0, 0, 0);
-
+        // Lưu ý: AHT20 chạy chung cổng I2C_NUM_1 trên chân 39, 40 với ToF
         aht20_write(AHT20_CMD_SOFT_RESET, NULL, 0);
         vTaskDelay(pdMS_TO_TICKS(20));
 
@@ -1025,14 +1017,18 @@ private:
     }
 
     void InitializeUltrasonic() {
+        // Khởi tạo riêng cổng I2C_NUM_1 trên chân 39 (SCL) và 40 (SDA) cho cảm biến khoảng cách & AHT20
         i2c_config_t conf = {};
         conf.mode = I2C_MODE_MASTER;
-        conf.sda_io_num = ULTRASONIC_SDA_PIN;
-        conf.scl_io_num = ULTRASONIC_SCL_PIN;
+        conf.sda_io_num = ULTRASONIC_SDA_PIN; // GPIO_NUM_40
+        conf.scl_io_num = ULTRASONIC_SCL_PIN; // GPIO_NUM_39
         conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
         conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+        
         i2c_param_config(TOF_I2C_PORT, &conf);
         i2c_driver_install(TOF_I2C_PORT, conf.mode, 0, 0, 0);
+
+        ESP_LOGI(TAG, "Ultrasonic/ToF and Sensors initialized on independent I2C_NUM_1 (SCL:39, SDA:40).");
     }
 
     float ReadUltrasonicDistanceCm() {
@@ -1155,17 +1151,18 @@ private:
     }
 
     void InitDisplay() {
-#if CONFIG_WK_ESP32S3_DEV_DISPLAY_OLED
+        // Cài đặt độc lập cổng I2C_NUM_0 cho màn hình OLED trên chân 41, 42
         i2c_config_t conf = {};
         conf.mode = I2C_MODE_MASTER;
-        conf.sda_io_num = DISPLAY_SDA_PIN;
-        conf.scl_io_num = DISPLAY_SCL_PIN;
+        conf.sda_io_num = DISPLAY_SDA_PIN; // GPIO_NUM_41
+        conf.scl_io_num = DISPLAY_SCL_PIN; // GPIO_NUM_42
         conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
         conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
         
         i2c_param_config(I2C_NUM_0, &conf);
         i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0);
-        
+
+#if CONFIG_WK_ESP32S3_DEV_DISPLAY_OLED
         esp_lcd_panel_io_i2c_config_t io_config = {};
         io_config.dev_addr = 0x3C;
         io_config.scl_speed_hz = 400 * 1000;
@@ -1202,12 +1199,13 @@ private:
         ESP_LOGI(TAG, "Starting delayed hardware initialization...");
 
         board->InitDisplay();
-        board->InitializeUltrasonic();
+        board->InitializeUltrasonic(); // Khởi tạo I2C_NUM_1 (chân 39, 40)
         board->InitializeLedGpio();
         board->InitializeAdc();
 
-        board->InitAHT20();
+        board->InitAHT20();            // Dùng chung I2C_NUM_1 với ToF
         board->InitializeAHT20Mcp();
+        board->InitializeSensorMcp();
 
         board->InitializeInfrared();
         board->InitializeInfraredMcp();
